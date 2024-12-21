@@ -1,67 +1,82 @@
-from flask import render_template, request, redirect, url_for, flash, abort, session, jsonify, Blueprint
-import json
-import os.path
+from flask import Blueprint, render_template, request, redirect, url_for, flash, session, jsonify, abort
 from werkzeug.utils import secure_filename
+import os
+from .models import URL
+from . import db
 
-bp = Blueprint('urlshort', __name__)
+bp = Blueprint("urlshort", __name__)
 
-@bp.route('/')
+USER_FILES_DIR = "static/user_files"
+
+
+@bp.route("/")
 def home():
-    return render_template("index.html", codes = session.keys())
+    """Render the home page."""
+    codes = [url.code for url in URL.query.all()]
+    return render_template("index.html", codes=codes)
 
-@bp.route('/your-url', methods = ['GET','POST'])
+
+@bp.route("/your-url", methods=["GET", "POST"])
 def your_url():
+    """Handle URL shortening requests."""
     if request.method == "POST":
-        urls = {}
+        code = request.form.get("code")
 
-        if os.path.exists('urls.json'):
-            with open('urls.json') as urls_file:
-                urls = json.load(urls_file)
-        
-        if request.form['code'] in urls.keys():
-            flash('Short name is already taken. Please select new one.')
-            return redirect(url_for('urlshort.home'))
+        if not code or URL.query.filter_by(code=code).first():
+            flash("Short name is already taken or invalid. Please choose a new one.")
+            return redirect(url_for("urlshort.home"))
 
-        #to check if user is trying to shorten 'url' or a 'file'.
-        if 'url' in request.form.keys():
-            urls[request.form['code']] = {'url':request.form['url']}
+        url_entry = URL(code=code)
+
+        if "url" in request.form:
+            url_entry.url = request.form["url"]
+        elif "file" in request.files:
+            file = request.files["file"]
+            filename = secure_filename(file.filename)
+            if not filename:
+                flash("Invalid file. Please upload a valid file.")
+                return redirect(url_for("urlshort.home"))
+            full_name = f"{code}_{filename}"
+            file_path = os.path.join(USER_FILES_DIR, full_name)
+            os.makedirs(USER_FILES_DIR, exist_ok=True)
+            file.save(file_path)
+            url_entry.file_name = full_name
         else:
-            f = request.files['file']
-            #secure_filename makes sure that no malicious file is uploaded.
-            full_name = request.form['code'] + secure_filename(f.filename)
-            f.save('/home/prajwal/Desktop/flask_practice/url_shortner/urlshort/static/user_files/'+full_name)
+            flash("No URL or file provided.")
+            return redirect(url_for("urlshort.home"))
 
-            urls[request.form['code']] = {'file':full_name}
+        # Save to the database
+        db.session.add(url_entry)
+        db.session.commit()
 
-        with open('urls.json', 'w') as url_file:
-            json.dump(urls, url_file)
-            #saving in cookie
-            session[request.form['code']] = True
+        session[code] = True
+        return render_template("your_url.html", code=code)
 
-        #when working with POST request to get parameter information we use .form instead of .args...
-        return render_template("your_url.html", code = request.form['code'])
-    else:
-        flash("Try new URL")
-        return redirect(url_for("urlshort.home"))
+    flash("Invalid request.")
+    return redirect(url_for("urlshort.home"))
 
-@bp.route('/<string:code>')
+
+@bp.route("/<string:code>")
 def redirect_to_url(code):
-    if os.path.exists('urls.json'):
-        with open('urls.json') as urls_file:
-            urls = json.load(urls_file)
-    
-            if code in urls.keys():
-                if 'url' in urls[code].keys():
-                    return redirect(urls[code]['url'])
-                else:
-                    return redirect(url_for('static', filename = 'user_files/' + urls[code]['file']))
+    """Redirect to the original URL or serve the uploaded file."""
+    url_entry = URL.query.filter_by(code=code).first()
+
+    if url_entry:
+        if url_entry.url:
+            return redirect(url_entry.url)
+        if url_entry.file_name:
+            return redirect(url_for("static", filename=f"user_files/{url_entry.file_name}"))
 
     return abort(404)
 
-@bp.route('/api')
+
+@bp.route("/api")
 def session_api():
+    """Return session data as JSON."""
     return jsonify(list(session.keys()))
+
 
 @bp.errorhandler(404)
 def page_not_found(error):
-    return render_template('page_not_found.html'), 404
+    """Render a custom 404 page."""
+    return render_template("page_not_found.html"), 404
